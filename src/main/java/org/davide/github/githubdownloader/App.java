@@ -9,11 +9,13 @@ import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.DefaultParser;
 import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+import org.davide.github.githubdownloader.core.GithubUrlBuilder;
 import org.davide.github.githubdownloader.models.Repo;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
-import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,92 +52,84 @@ public class App implements CommandLineRunner
     @Override
     public void run(String... args) throws Exception
     {
-        String url = null;
-        String organization = null;
         String downloadLocation = null;
         String username = null;
         String password = null;
 
-        Options options = new Options();
-        options.addOption("a", true, "Url of the GitHub API server, in format https://....com");
-        options.addOption("o", true, "Organization name");
-        options.addOption("d", true, "Download location");
-        options.addOption("u", true, "Username");
-        options.addOption("p", true, "Password");
-
-        CommandLineParser parser = new DefaultParser();
-        CommandLine cmd = parser.parse(options, args);
+        Options options = getOptions();
 
         HelpFormatter formatter = new HelpFormatter();
-        formatter.printHelp("GitDownloader", options);
+        String header = "Do something useful with an input file\n\n";
+        String footer = "\nPlease report issues at http://example.com/issues";
+        formatter.printHelp("GitDownloader", header, options, footer, true);
 
-        if (cmd.hasOption("o")) {
-            organization = cmd.getOptionValue("o");
-        } else {
-            log.error("You should enter an organization");
-            System.exit(0);
-        }
-        if (cmd.hasOption("a")) {
-            log.warn(cmd.getOptionValue("a"));
-            url = cmd.getOptionValue("a");
-            if(url.equals("https://github.com")){
-                url = "https://api.github.com/orgs/" + organization;
-            }else{
-                url = url + "/api/v3/orgs/" + organization;
+        GithubUrlBuilder urlBuilder = new GithubUrlBuilder();
+        CommandLineParser parser = new DefaultParser();
+
+        validateInputs(parser);
+
+        try {
+            if (cmd.hasOption("h")) {
+                formatter.printHelp("GitDownloader", header, options, footer, true);
+                continue;
             }
-        } else {
-            log.error("You should enter an url");
-            System.exit(0);
-        }
-        if (cmd.hasOption("d")) {
-            downloadLocation = cmd.getOptionValue("d");
-        } else {
-            log.error("You should enter a download location");
-            System.exit(0);
-        }
-        if (cmd.hasOption("u")) {
-            username = cmd.getOptionValue("u");
-        } else {
-            log.error("You should enter an username");
-            System.exit(0);
-        }
-        if (cmd.hasOption("p")) {
-            password = cmd.getOptionValue("p");
-        } else {
-            log.error("You should enter a password");
-            System.exit(0);
+            if (cmd.hasOption("a")) {
+                urlBuilder.setUrl(cmd.getOptionValue("a"));
+            }
+            if (cmd.hasOption("o")) {
+                urlBuilder.setOrganization(cmd.getOptionValue("o"));
+            } else {
+                throw new ParseException("You should enter an organization");
+            }
+            if (cmd.hasOption("d")) {
+                downloadLocation = cmd.getOptionValue("d");
+            } else {
+                downloadLocation = Paths.get("DefaultDownloadLocation").toString();
+            }
+//        if (cmd.hasOption("u")) {
+//            username = cmd.getOptionValue("u");
+//        } else {
+//            log.error("You should enter an username");
+//            System.exit(0);
+//        }
+//        if (cmd.hasOption("p")) {
+//            password = cmd.getOptionValue("p");
+//        } else {
+//            log.error("You should enter a password");
+//            System.exit(0);
+//        }
+            break;
+        } catch (ParseException exp) {
+            log.error("Something went wrong parsing your command... Please, try again. Error message: " + exp.getMessage());
+            formatter.printHelp("GitDownloader", header, options, footer, true);
         }
 
-        String address = url + "/repos";
-
-        log.warn("Address: " + address);
-
-        UriComponentsBuilder builder = UriComponentsBuilder
-            .fromUriString(address)
+        UriComponentsBuilder queryBuilder = UriComponentsBuilder
+            .fromUriString(urlBuilder.build())
             .queryParam("per_page", 1000);
 
-        log.info("URL: " + builder.toUriString());
-        ResponseEntity<List<Repo>> repoList = restTemplate.exchange(builder.toUriString(),
+        log.info("URL: " + queryBuilder.toUriString());
+        ResponseEntity<List<Repo>> repoList = restTemplate.exchange(queryBuilder.toUriString(),
                                                                     HttpMethod.GET, null,
                                                                     new ParameterizedTypeReference<List<Repo>>()
                                                                 {
                                                                 });
         List<Repo> list = repoList.getBody();
-        log.info("Repos number: " + list.size());
-        final String downloaded = downloadLocation;
-        final String user = username;
-        final String pass = password;
+        log.error("Repos number: " + list.size());
+        final Path createdDirectory = Files.createDirectory(Paths.get(downloadLocation));
+
         list.parallelStream().forEach(r -> {
-            Path download = Paths.get(downloaded, r.getName());
+            Path download = Paths.get(createdDirectory.toString(), r.getName());
             try {
-                Files.createDirectories(download);
+                Files.createDirectory(download);
             } catch (IOException ex) {
-                log.error("Error while creating directory: " + downloaded);
+                log.error("Error while creating directory: " + download);
             }
-            log.info("Cloning from " + r.getGit_url() + " to " + downloaded);
+            log.info("Cloning from " + r.getGit_url() + " to " + download);
+
             try (Git result = Git.cloneRepository()
                 .setURI(r.getGit_url())
-                .setCredentialsProvider(new UsernamePasswordCredentialsProvider(user, pass))
+                //.setCredentialsProvider(new UsernamePasswordCredentialsProvider(user, pass))
                 .setDirectory(download.toFile())
                 .call()) {
                 // Note: the call() returns an opened repository already which needs to be closed to avoid file handle leaks!
@@ -146,6 +140,79 @@ public class App implements CommandLineRunner
             log.warn("DONE! " + r.getName());
         });
         log.info("Completed!!!!!!!!!!!");
+    }
+
+    private static Options getOptions()
+    {
+        // url option
+        Option urlOption = Option.builder("a")
+            .longOpt("url")
+            .desc("Url of the GitHub API server, in the format https://....com")
+            .numberOfArgs(1)
+            .required(false)
+            .build();
+
+        // organization option
+        Option organizationOption = Option.builder("o")
+            .longOpt("organization")
+            .desc("Organization name")
+            .numberOfArgs(1)
+            .required(true)
+            .build();
+
+        // download location option
+        Option downloadLocationOption = Option.builder("d")
+            .longOpt("downloadLocation")
+            .desc("Download location. By default is DefaultDownloadLocation")
+            .numberOfArgs(1)
+            .required(false)
+            .build();
+
+        // username option
+        Option usernameOption = Option.builder("u")
+            .longOpt("username")
+            .desc("Username, only needed for private repos")
+            .numberOfArgs(1)
+            .required(false)
+            .build();
+
+        // password option
+        Option passwordOption = Option.builder("p")
+            .longOpt("password")
+            .desc("Password, only needed for private repos")
+            .numberOfArgs(1)
+            .required(false)
+            .build();
+
+        // help option
+        Option helpOption = Option.builder("h")
+            .longOpt("help")
+            .desc("Print this help information")
+            .hasArg(false)
+            .required(false)
+            .build();
+
+        Options options = new Options();
+        options.addOption(urlOption);
+        options.addOption(organizationOption);
+        options.addOption(downloadLocationOption);
+        options.addOption(usernameOption);
+        options.addOption(passwordOption);
+        options.addOption(helpOption);
+
+        return options;
+    }
+
+    private boolean validateInputs(CommandLineParser parser, Options options, String... args)
+    {
+        CommandLine cmd = parser.parse(options, args);
+        if (cmd.getOptions().length == 0) {
+            return false;
+        } else if (!cmd.hasOption("o")) {
+            return false;
+        } else {
+            return true;
+        }
     }
 
 }
